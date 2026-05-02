@@ -7,7 +7,7 @@ function App() {
     <I18nextProvider i18n={i18n}>
       <Router>
         <Routes>
-          <Route path="/" element={<div>Bienvenido a NEXURA</div>} />
+          <Route path="/" element={<div className="flex items-center justify-center min-h-screen">Bienvenido a NEXURA</div>} />
         </Routes>
       </Router>
     </I18nextProvider>
