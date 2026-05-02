@@ -1,0 +1,995 @@
+import { useState, useEffect, useCallback } from "react";
+import { supabase } from "@/lib/supabase";
+
+type EstadoReserva = "pendiente" | "confirmada" | "cancelada" | "completada";
+
+interface BarcoBooking {
+  id: string;
+  barco_id: string;
+  barco_nombre: string | null;
+  cliente_nombre: string | null;
+  cliente_email: string | null;
+  cliente_telefono: string | null;
+  fecha_inicio: string;
+  fecha_fin: string;
+  duracion: string | null;
+  num_personas: number | null;
+  precio_total: number | null;
+  precio_base: number | null;
+  comision_nexura: number | null;
+  iva_comision: number | null;
+  servicios_extra: { key: string; label: string; precio: number }[] | null;
+  metodo_pago: string | null;
+  estado: EstadoReserva;
+  notas: string | null;
+  created_at: string;
+}
+
+const estadoConfig: Record<EstadoReserva, { label: string; color: string; icon: string; bg: string; dot: string }> = {
+  pendiente:  { label: "Pendiente",  color: "text-amber-700",   icon: "ri-time-line",         bg: "bg-amber-50",   dot: "bg-amber-400" },
+  confirmada: { label: "Confirmada", color: "text-emerald-700", icon: "ri-check-double-line",  bg: "bg-emerald-50", dot: "bg-emerald-500" },
+  cancelada:  { label: "Cancelada",  color: "text-red-700",     icon: "ri-close-circle-line",  bg: "bg-red-50",     dot: "bg-red-500" },
+  completada: { label: "Completada", color: "text-stone-600",   icon: "ri-flag-line",          bg: "bg-stone-100",  dot: "bg-stone-400" },
+};
+
+const metodoPagoIcon: Record<string, string> = {
+  Revolut: "ri-exchange-dollar-line",
+  Bizum: "ri-smartphone-line",
+  Efectivo: "ri-money-euro-circle-line",
+  Transferencia: "ri-bank-line",
+};
+
+function formatDate(d: string) {
+  if (!d) return "—";
+  return new Date(d).toLocaleDateString("es-ES", { day: "2-digit", month: "short", year: "numeric" });
+}
+
+function formatDateTime(d: string) {
+  if (!d) return "—";
+  return new Date(d).toLocaleDateString("es-ES", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+// Mini calendario de disponibilidad para el panel admin
+function MiniCalendar({ barcoId, bookings }: { barcoId: string; bookings: BarcoBooking[] }) {
+  const [currentMonth, setCurrentMonth] = useState(new Date());
+
+  const year = currentMonth.getFullYear();
+  const month = currentMonth.getMonth();
+  const firstDay = new Date(year, month, 1).getDay();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const startOffset = firstDay === 0 ? 6 : firstDay - 1;
+
+  const activeBookings = bookings.filter(
+    (b) => b.barco_id === barcoId && (b.estado === "confirmada" || b.estado === "pendiente")
+  );
+
+  const isBlocked = (day: number) => {
+    const date = new Date(year, month, day);
+    return activeBookings.some((b) => {
+      const start = new Date(b.fecha_inicio);
+      const end = new Date(b.fecha_fin);
+      return date >= start && date <= end;
+    });
+  };
+
+  const getBookingForDay = (day: number) => {
+    const date = new Date(year, month, day);
+    return activeBookings.find((b) => {
+      const start = new Date(b.fecha_inicio);
+      const end = new Date(b.fecha_fin);
+      return date >= start && date <= end;
+    });
+  };
+
+  const today = new Date();
+  const isToday = (day: number) => today.getFullYear() === year && today.getMonth() === month && today.getDate() === day;
+
+  const monthName = currentMonth.toLocaleDateString("es-ES", { month: "long", year: "numeric" });
+
+  return (
+    <div className="bg-stone-50 rounded-xl p-4">
+      <div className="flex items-center justify-between mb-3">
+        <button
+          onClick={() => setCurrentMonth(new Date(year, month - 1, 1))}
+          className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-stone-200 cursor-pointer text-stone-500 transition-colors"
+        >
+          <i className="ri-arrow-left-s-line text-sm"></i>
+        </button>
+        <span className="text-xs font-semibold text-stone-700 capitalize">{monthName}</span>
+        <button
+          onClick={() => setCurrentMonth(new Date(year, month + 1, 1))}
+          className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-stone-200 cursor-pointer text-stone-500 transition-colors"
+        >
+          <i className="ri-arrow-right-s-line text-sm"></i>
+        </button>
+      </div>
+
+      {/* Días de la semana */}
+      <div className="grid grid-cols-7 mb-1">
+        {["L", "M", "X", "J", "V", "S", "D"].map((d) => (
+          <div key={d} className="text-center text-xs text-stone-400 font-medium py-1">{d}</div>
+        ))}
+      </div>
+
+      {/* Días */}
+      <div className="grid grid-cols-7 gap-0.5">
+        {Array.from({ length: startOffset }).map((_, i) => (
+          <div key={`empty-${i}`} />
+        ))}
+        {Array.from({ length: daysInMonth }).map((_, i) => {
+          const day = i + 1;
+          const blocked = isBlocked(day);
+          const booking = getBookingForDay(day);
+          const todayMark = isToday(day);
+          return (
+            <div
+              key={day}
+              title={blocked && booking ? `${booking.cliente_nombre || "Reservado"} · ${estadoConfig[booking.estado].label}` : ""}
+              className={`
+                relative h-7 flex items-center justify-center rounded-md text-xs font-medium transition-colors
+                ${blocked
+                  ? booking?.estado === "confirmada"
+                    ? "bg-emerald-500 text-white"
+                    : "bg-amber-400 text-white"
+                  : "text-stone-600 hover:bg-stone-200"
+                }
+                ${todayMark && !blocked ? "ring-2 ring-amber-400 ring-offset-1" : ""}
+              `}
+            >
+              {day}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Leyenda */}
+      <div className="flex items-center gap-3 mt-3 pt-3 border-t border-stone-200">
+        <div className="flex items-center gap-1.5">
+          <div className="w-3 h-3 rounded-sm bg-emerald-500"></div>
+          <span className="text-xs text-stone-500">Confirmada</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <div className="w-3 h-3 rounded-sm bg-amber-400"></div>
+          <span className="text-xs text-stone-500">Pendiente</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <div className="w-3 h-3 rounded-sm ring-2 ring-amber-400 ring-offset-1 bg-white"></div>
+          <span className="text-xs text-stone-500">Hoy</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default function BarcoBookingsSection() {
+  const [bookings, setBookings] = useState<BarcoBooking[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState<BarcoBooking | null>(null);
+  const [filterEstado, setFilterEstado] = useState<"todos" | EstadoReserva>("todos");
+  const [filterBarco, setFilterBarco] = useState("todos");
+  const [search, setSearch] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const [showCalendar, setShowCalendar] = useState(false);
+  const [calendarBarcoId, setCalendarBarcoId] = useState<string | null>(null);
+  const [metodoPago, setMetodoPago] = useState<"Revolut" | "Bizum" | "Efectivo" | "Transferencia">("Revolut");
+  const [showNewModal, setShowNewModal] = useState(false);
+  const [newForm, setNewForm] = useState({
+    barco_nombre: "",
+    cliente_nombre: "",
+    cliente_email: "",
+    cliente_telefono: "",
+    fecha_inicio: "",
+    fecha_fin: "",
+    duracion: "Día completo",
+    num_personas: 2,
+    precio_base: 0,
+    notas: "",
+  });
+  const [newSaving, setNewSaving] = useState(false);
+
+  const fetchBookings = useCallback(async () => {
+    setLoading(true);
+    const { data } = await supabase
+      .from("barco_bookings")
+      .select("*")
+      .order("fecha_inicio", { ascending: false });
+    if (data) setBookings(data as BarcoBooking[]);
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    fetchBookings();
+  }, [fetchBookings]);
+
+  // Suscripción en tiempo real para actualizar el calendario automáticamente
+  useEffect(() => {
+    const channel = supabase
+      .channel("barco_bookings_admin")
+      .on("postgres_changes", { event: "*", schema: "public", table: "barco_bookings" }, () => {
+        fetchBookings();
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [fetchBookings]);
+
+  const barcos = Array.from(new Set(bookings.map((b) => b.barco_id))).map((id) => ({
+    id,
+    nombre: bookings.find((b) => b.barco_id === id)?.barco_nombre || id,
+  }));
+
+  const filtered = bookings.filter((b) => {
+    const matchEstado = filterEstado === "todos" || b.estado === filterEstado;
+    const matchBarco = filterBarco === "todos" || b.barco_id === filterBarco;
+    const q = search.toLowerCase();
+    const matchSearch = !q
+      || (b.cliente_nombre || "").toLowerCase().includes(q)
+      || (b.barco_nombre || "").toLowerCase().includes(q)
+      || (b.cliente_email || "").toLowerCase().includes(q);
+    return matchEstado && matchBarco && matchSearch;
+  });
+
+  const counts = {
+    pendiente: bookings.filter((b) => b.estado === "pendiente").length,
+    confirmada: bookings.filter((b) => b.estado === "confirmada").length,
+    cancelada: bookings.filter((b) => b.estado === "cancelada").length,
+    completada: bookings.filter((b) => b.estado === "completada").length,
+  };
+
+  const showSuccess = (msg: string) => {
+    setSuccessMsg(msg);
+    setTimeout(() => setSuccessMsg(null), 3500);
+  };
+
+  const updateEstado = async (id: string, estado: EstadoReserva) => {
+    setSaving(true);
+    const { error } = await supabase
+      .from("barco_bookings")
+      .update({ estado, updated_at: new Date().toISOString() })
+      .eq("id", id);
+    if (!error) {
+      setBookings((prev) => prev.map((b) => b.id === id ? { ...b, estado } : b));
+      if (selected?.id === id) setSelected((prev) => prev ? { ...prev, estado } : null);
+      const labels: Record<EstadoReserva, string> = {
+        confirmada: "Reserva confirmada — el calendario se ha actualizado",
+        cancelada: "Reserva cancelada — fechas liberadas en el calendario",
+        completada: "Reserva marcada como completada",
+        pendiente: "Reserva restablecida a pendiente",
+      };
+      showSuccess(labels[estado]);
+
+      // Notificación WhatsApp al confirmar o cancelar
+      if (estado === "confirmada" || estado === "cancelada") {
+        const booking = bookings.find((b) => b.id === id);
+        if (booking) {
+          try {
+            await supabase.functions.invoke("whatsapp-notify", {
+              body: {
+                tipo: "cambio_estado",
+                estado_nuevo: estado === "confirmada" ? "✅ CONFIRMADA" : "❌ CANCELADA",
+                propiedad: `Barco: ${booking.barco_nombre}`,
+                huesped: booking.cliente_nombre,
+                fecha_inicio: formatDate(booking.fecha_inicio),
+                fecha_fin: formatDate(booking.fecha_fin),
+                precio_total: booking.precio_total,
+                num_huespedes: booking.num_personas,
+                estado: estadoConfig[estado].label,
+              },
+            });
+          } catch (e) {
+            console.error("WhatsApp notify error:", e);
+          }
+        }
+      }
+    }
+    setSaving(false);
+  };
+
+  const markAsPaid = async (id: string) => {
+    setSaving(true);
+    const { error } = await supabase
+      .from("barco_bookings")
+      .update({ metodo_pago: metodoPago, updated_at: new Date().toISOString() })
+      .eq("id", id);
+    if (!error) {
+      setBookings((prev) => prev.map((b) => b.id === id ? { ...b, metodo_pago: metodoPago } : b));
+      if (selected?.id === id) setSelected((prev) => prev ? { ...prev, metodo_pago: metodoPago } : null);
+      showSuccess(`Pago registrado por ${metodoPago}`);
+    }
+    setSaving(false);
+  };
+
+  const handleCreateBooking = async () => {
+    if (!newForm.barco_nombre || !newForm.cliente_nombre || !newForm.fecha_inicio || !newForm.fecha_fin) return;
+    setNewSaving(true);
+    const precioBase = newForm.precio_base || 0;
+    const comision = Math.round(precioBase * 0.15);
+    const ivaComision = Math.round(comision * 0.21);
+    const total = precioBase + comision + ivaComision;
+
+    const { data, error } = await supabase.from("barco_bookings").insert({
+      barco_id: newForm.barco_nombre.toLowerCase().replace(/\s+/g, "-"),
+      barco_nombre: newForm.barco_nombre,
+      cliente_nombre: newForm.cliente_nombre,
+      cliente_email: newForm.cliente_email || null,
+      cliente_telefono: newForm.cliente_telefono || null,
+      fecha_inicio: newForm.fecha_inicio,
+      fecha_fin: newForm.fecha_fin,
+      duracion: newForm.duracion,
+      num_personas: newForm.num_personas,
+      precio_base: precioBase,
+      precio_total: total,
+      comision_nexura: comision,
+      iva_comision: ivaComision,
+      notas: newForm.notas || null,
+      estado: "pendiente",
+    }).select().maybeSingle();
+
+    if (!error && data) {
+      setBookings((prev) => [data as BarcoBooking, ...prev]);
+      showSuccess("Reserva creada correctamente");
+      setShowNewModal(false);
+      setNewForm({
+        barco_nombre: "", cliente_nombre: "", cliente_email: "", cliente_telefono: "",
+        fecha_inicio: "", fecha_fin: "", duracion: "Día completo", num_personas: 2, precio_base: 0, notas: "",
+      });
+    }
+    setNewSaving(false);
+  };
+
+  const calendarBarco = calendarBarcoId ? barcos.find((b) => b.id === calendarBarcoId) : null;
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+        <div>
+          <h2 className="text-xl font-semibold text-stone-900 flex items-center gap-2">
+            <i className="ri-ship-line text-sky-600"></i>
+            Reservas de Barcos
+          </h2>
+          <p className="text-stone-500 text-sm mt-0.5">{bookings.length} reservas · Calendario sincronizado en tiempo real</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowCalendar(!showCalendar)}
+            className={`flex items-center gap-2 px-4 py-2.5 rounded-full text-sm font-medium border transition-colors cursor-pointer whitespace-nowrap ${
+              showCalendar ? "bg-sky-600 text-white border-transparent" : "bg-white border-stone-200 text-stone-600 hover:border-stone-400"
+            }`}
+          >
+            <i className="ri-calendar-2-line"></i>
+            Vista calendario
+          </button>
+          <button
+            onClick={() => setShowNewModal(true)}
+            className="flex items-center gap-2 bg-stone-900 text-white px-5 py-2.5 rounded-full text-sm font-semibold hover:bg-stone-700 transition-colors cursor-pointer whitespace-nowrap"
+          >
+            <i className="ri-add-line"></i> Nueva reserva
+          </button>
+        </div>
+      </div>
+
+      {/* Toast de éxito */}
+      {successMsg && (
+        <div className="flex items-center gap-3 bg-emerald-50 border border-emerald-200 rounded-xl px-4 py-3 text-sm text-emerald-700 font-medium">
+          <i className="ri-checkbox-circle-fill text-emerald-500 text-base flex-shrink-0"></i>
+          {successMsg}
+        </div>
+      )}
+
+      {/* Stats */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        {(Object.entries(estadoConfig) as [EstadoReserva, typeof estadoConfig[EstadoReserva]][]).map(([key, cfg]) => (
+          <button
+            key={key}
+            onClick={() => setFilterEstado(filterEstado === key ? "todos" : key)}
+            className={`bg-white rounded-xl border p-4 text-left transition-all cursor-pointer ${
+              filterEstado === key ? "border-stone-400 ring-1 ring-stone-200" : "border-stone-100 hover:border-stone-200"
+            }`}
+          >
+            <div className={`w-8 h-8 flex items-center justify-center rounded-lg ${cfg.bg} ${cfg.color} mb-2`}>
+              <i className={`${cfg.icon} text-sm`}></i>
+            </div>
+            <div className="text-2xl font-bold text-stone-900">{counts[key]}</div>
+            <div className="text-xs text-stone-500">{cfg.label}</div>
+          </button>
+        ))}
+      </div>
+
+      {/* Vista calendario por barco */}
+      {showCalendar && (
+        <div className="bg-white rounded-2xl border border-stone-100 p-6">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="font-semibold text-stone-900 text-sm flex items-center gap-2">
+              <i className="ri-calendar-2-line text-sky-600"></i>
+              Disponibilidad por embarcación
+            </h3>
+            <div className="flex items-center gap-2 text-xs text-stone-400">
+              <i className="ri-refresh-line"></i>
+              Actualización en tiempo real
+            </div>
+          </div>
+
+          {/* Selector de barco */}
+          <div className="flex flex-wrap gap-2 mb-5">
+            {barcos.map((b) => (
+              <button
+                key={b.id}
+                onClick={() => setCalendarBarcoId(calendarBarcoId === b.id ? null : b.id)}
+                className={`px-3 py-1.5 rounded-full text-xs font-medium border transition-all cursor-pointer whitespace-nowrap ${
+                  calendarBarcoId === b.id
+                    ? "bg-sky-600 text-white border-transparent"
+                    : "bg-white border-stone-200 text-stone-600 hover:border-sky-300"
+                }`}
+              >
+                <i className="ri-ship-line mr-1"></i>{b.nombre}
+              </button>
+            ))}
+            {barcos.length === 0 && (
+              <p className="text-xs text-stone-400">No hay embarcaciones con reservas aún</p>
+            )}
+          </div>
+
+          {calendarBarcoId && (
+            <div className="max-w-sm">
+              <p className="text-xs font-semibold text-stone-600 mb-3">
+                <i className="ri-ship-line mr-1 text-sky-600"></i>
+                {calendarBarco?.nombre}
+              </p>
+              <MiniCalendar barcoId={calendarBarcoId} bookings={bookings} />
+              {/* Reservas activas de este barco */}
+              <div className="mt-4 space-y-2">
+                <p className="text-xs font-semibold text-stone-500 uppercase tracking-wide">Reservas activas</p>
+                {bookings
+                  .filter((b) => b.barco_id === calendarBarcoId && (b.estado === "confirmada" || b.estado === "pendiente"))
+                  .map((b) => (
+                    <div
+                      key={b.id}
+                      onClick={() => { setSelected(b); setShowCalendar(false); }}
+                      className="flex items-center justify-between bg-stone-50 rounded-lg px-3 py-2.5 cursor-pointer hover:bg-stone-100 transition-colors"
+                    >
+                      <div>
+                        <p className="text-xs font-semibold text-stone-800">{b.cliente_nombre || "Cliente"}</p>
+                        <p className="text-xs text-stone-500">{formatDate(b.fecha_inicio)} → {formatDate(b.fecha_fin)}</p>
+                      </div>
+                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${estadoConfig[b.estado].bg} ${estadoConfig[b.estado].color}`}>
+                        {estadoConfig[b.estado].label}
+                      </span>
+                    </div>
+                  ))}
+                {bookings.filter((b) => b.barco_id === calendarBarcoId && (b.estado === "confirmada" || b.estado === "pendiente")).length === 0 && (
+                  <p className="text-xs text-stone-400 text-center py-3">Sin reservas activas</p>
+                )}
+              </div>
+            </div>
+          )}
+
+          {!calendarBarcoId && barcos.length > 0 && (
+            <p className="text-xs text-stone-400 text-center py-6">Selecciona una embarcación para ver su calendario</p>
+          )}
+        </div>
+      )}
+
+      {/* Filtros */}
+      <div className="flex flex-col sm:flex-row gap-3">
+        <div className="relative flex-1 max-w-xs">
+          <i className="ri-search-line absolute left-3 top-1/2 -translate-y-1/2 text-stone-400 text-sm"></i>
+          <input
+            type="text"
+            placeholder="Buscar cliente o embarcación..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="w-full pl-9 pr-4 py-2.5 border border-stone-200 rounded-full text-sm focus:outline-none focus:border-stone-400 bg-white"
+          />
+        </div>
+        <select
+          value={filterBarco}
+          onChange={(e) => setFilterBarco(e.target.value)}
+          className="border border-stone-200 rounded-full px-4 py-2.5 text-sm focus:outline-none focus:border-stone-400 bg-white cursor-pointer text-stone-600"
+        >
+          <option value="todos">Todas las embarcaciones</option>
+          {barcos.map((b) => (
+            <option key={b.id} value={b.id}>{b.nombre}</option>
+          ))}
+        </select>
+        <div className="flex bg-white border border-stone-200 rounded-full p-1 gap-1">
+          {(["todos", "pendiente", "confirmada", "cancelada", "completada"] as const).map((f) => (
+            <button
+              key={f}
+              onClick={() => setFilterEstado(f)}
+              className={`px-3 py-1.5 rounded-full text-xs font-medium transition-all cursor-pointer whitespace-nowrap ${
+                filterEstado === f ? "bg-stone-900 text-white" : "text-stone-500 hover:text-stone-800"
+              }`}
+            >
+              {f === "todos" ? "Todas" : estadoConfig[f].label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Contenido principal */}
+      <div className="flex flex-col lg:flex-row gap-6">
+        {/* Lista */}
+        <div className="flex-1 space-y-3">
+          {loading ? (
+            <div className="text-center py-16 text-stone-400 text-sm bg-white rounded-xl border border-stone-100">
+              <i className="ri-loader-4-line animate-spin text-2xl mb-2 block"></i>
+              Cargando reservas...
+            </div>
+          ) : filtered.length === 0 ? (
+            <div className="text-center py-16 bg-white rounded-xl border border-stone-100">
+              <div className="w-14 h-14 flex items-center justify-center rounded-full bg-sky-50 text-sky-400 mx-auto mb-3">
+                <i className="ri-ship-line text-2xl"></i>
+              </div>
+              <p className="text-stone-500 text-sm font-medium">No hay reservas</p>
+              <p className="text-stone-400 text-xs mt-1">Crea la primera reserva con el botón de arriba</p>
+            </div>
+          ) : filtered.map((b) => {
+            const cfg = estadoConfig[b.estado];
+            return (
+              <div
+                key={b.id}
+                onClick={() => setSelected(b)}
+                className={`bg-white rounded-xl border p-4 cursor-pointer transition-all hover:border-stone-300 ${
+                  selected?.id === b.id ? "border-stone-400 ring-1 ring-stone-200" : "border-stone-100"
+                }`}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-start gap-3 min-w-0">
+                    <div className="w-10 h-10 flex items-center justify-center rounded-xl bg-sky-50 text-sky-600 flex-shrink-0">
+                      <i className="ri-ship-line text-base"></i>
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-stone-900 font-semibold text-sm truncate">
+                        {b.barco_nombre || "Embarcación"}
+                      </div>
+                      <div className="text-stone-500 text-xs truncate mt-0.5">
+                        <i className="ri-user-line mr-1"></i>{b.cliente_nombre || "Cliente"}
+                        {b.cliente_telefono && (
+                          <span className="ml-2 text-stone-400">· {b.cliente_telefono}</span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-3 mt-1.5 flex-wrap">
+                        <span className="text-xs text-stone-500">
+                          <i className="ri-calendar-event-line mr-1"></i>
+                          {formatDate(b.fecha_inicio)} → {formatDate(b.fecha_fin)}
+                        </span>
+                        {b.duracion && (
+                          <span className="text-xs bg-stone-100 text-stone-500 px-2 py-0.5 rounded-full">{b.duracion}</span>
+                        )}
+                        {b.num_personas && (
+                          <span className="text-xs text-stone-400">
+                            <i className="ri-group-line mr-1"></i>{b.num_personas} pers.
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex flex-col items-end gap-2 flex-shrink-0">
+                    <span className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium ${cfg.bg} ${cfg.color}`}>
+                      <i className={cfg.icon}></i> {cfg.label}
+                    </span>
+                    {b.precio_total && (
+                      <span className="text-sm font-bold text-stone-800">{b.precio_total.toLocaleString("es-ES")}€</span>
+                    )}
+                    {b.metodo_pago && (
+                      <span className="text-xs text-emerald-600 flex items-center gap-1">
+                        <i className={metodoPagoIcon[b.metodo_pago] || "ri-money-euro-circle-line"}></i>
+                        {b.metodo_pago}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Panel de detalle */}
+        {selected && (
+          <div className="w-full lg:w-96 bg-white rounded-2xl border border-stone-100 p-6 h-fit sticky top-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="font-semibold text-stone-900 text-sm">Detalle de reserva</h3>
+              <button
+                onClick={() => setSelected(null)}
+                className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-stone-100 cursor-pointer text-stone-400"
+              >
+                <i className="ri-close-line text-sm"></i>
+              </button>
+            </div>
+
+            {/* Estado */}
+            <div className={`flex items-center gap-2 px-3 py-2.5 rounded-xl ${estadoConfig[selected.estado].bg}`}>
+              <div className={`w-2 h-2 rounded-full ${estadoConfig[selected.estado].dot}`}></div>
+              <span className={`text-sm font-semibold ${estadoConfig[selected.estado].color}`}>
+                {estadoConfig[selected.estado].label}
+              </span>
+              <span className="text-xs text-stone-400 ml-auto">{formatDateTime(selected.created_at)}</span>
+            </div>
+
+            {/* Embarcación */}
+            <div className="bg-sky-50 rounded-xl p-4">
+              <div className="flex items-center gap-2 mb-1">
+                <i className="ri-ship-line text-sky-600 text-sm"></i>
+                <span className="text-xs font-semibold text-sky-700 uppercase tracking-wide">Embarcación</span>
+              </div>
+              <p className="text-stone-900 font-semibold text-sm">{selected.barco_nombre || "—"}</p>
+              {selected.duracion && (
+                <span className="text-xs bg-sky-100 text-sky-700 px-2 py-0.5 rounded-full mt-1 inline-block">{selected.duracion}</span>
+              )}
+            </div>
+
+            {/* Cliente */}
+            <div className="bg-stone-50 rounded-xl p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <i className="ri-user-line text-stone-500 text-sm"></i>
+                <span className="text-xs font-semibold text-stone-600 uppercase tracking-wide">Cliente</span>
+              </div>
+              <p className="text-stone-900 font-semibold text-sm">{selected.cliente_nombre || "—"}</p>
+              {selected.cliente_email && (
+                <a href={`mailto:${selected.cliente_email}`} className="text-xs text-stone-500 hover:text-stone-800 flex items-center gap-1 mt-1 cursor-pointer">
+                  <i className="ri-mail-line"></i>{selected.cliente_email}
+                </a>
+              )}
+              {selected.cliente_telefono && (
+                <a href={`tel:${selected.cliente_telefono}`} className="text-xs text-stone-500 hover:text-stone-800 flex items-center gap-1 mt-0.5 cursor-pointer">
+                  <i className="ri-phone-line"></i>{selected.cliente_telefono}
+                </a>
+              )}
+              {selected.num_personas && (
+                <p className="text-xs text-stone-400 mt-1">
+                  <i className="ri-group-line mr-1"></i>{selected.num_personas} personas
+                </p>
+              )}
+            </div>
+
+            {/* Fechas */}
+            <div className="grid grid-cols-2 gap-3">
+              <div className="bg-emerald-50 rounded-xl p-3 text-center">
+                <p className="text-xs text-emerald-600 font-medium mb-1">Salida</p>
+                <p className="text-sm font-bold text-stone-900">{formatDate(selected.fecha_inicio)}</p>
+              </div>
+              <div className="bg-red-50 rounded-xl p-3 text-center">
+                <p className="text-xs text-red-500 font-medium mb-1">Regreso</p>
+                <p className="text-sm font-bold text-stone-900">{formatDate(selected.fecha_fin)}</p>
+              </div>
+            </div>
+
+            {/* Precio desglose */}
+            {selected.precio_total && (
+              <div className="bg-stone-900 rounded-xl p-4">
+                <p className="text-stone-400 text-xs mb-2 text-center">Precio total</p>
+                <p className="text-white text-2xl font-bold text-center">{selected.precio_total.toLocaleString("es-ES")}€</p>
+                <div className="mt-3 pt-3 border-t border-stone-700 space-y-1.5">
+                  {selected.precio_base && selected.precio_base > 0 && (
+                    <div className="flex justify-between text-xs text-stone-400">
+                      <span>Base embarcación</span>
+                      <span>€{selected.precio_base.toLocaleString("es-ES")}</span>
+                    </div>
+                  )}
+                  {selected.comision_nexura && selected.comision_nexura > 0 && (
+                    <div className="flex justify-between text-xs text-stone-400">
+                      <span>Comisión NEXURA (15%)</span>
+                      <span>€{selected.comision_nexura.toLocaleString("es-ES")}</span>
+                    </div>
+                  )}
+                  {selected.iva_comision && selected.iva_comision > 0 && (
+                    <div className="flex justify-between text-xs text-amber-400 font-semibold">
+                      <span>IVA 21% (comisión mediación)</span>
+                      <span>€{selected.iva_comision.toLocaleString("es-ES")}</span>
+                    </div>
+                  )}
+                  {selected.servicios_extra && selected.servicios_extra.length > 0 && (
+                    <div className="pt-1 border-t border-stone-700">
+                      {selected.servicios_extra.map((s) => (
+                        <div key={s.key} className="flex justify-between text-xs text-stone-500">
+                          <span>· {s.label}</span>
+                          <span>€{s.precio}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Notas */}
+            {selected.notas && (
+              <div className="bg-amber-50 border border-amber-100 rounded-xl p-3 text-xs text-stone-600">
+                <span className="font-semibold text-amber-700 flex items-center gap-1 mb-1">
+                  <i className="ri-sticky-note-line"></i> Notas
+                </span>
+                {selected.notas}
+              </div>
+            )}
+
+            {/* Pago */}
+            <div>
+              {selected.metodo_pago ? (
+                <div className="bg-emerald-50 border border-emerald-100 rounded-xl p-3">
+                  <div className="flex items-center gap-2">
+                    <i className="ri-checkbox-circle-fill text-emerald-600"></i>
+                    <span className="text-xs font-semibold text-emerald-700">Pago recibido · {selected.metodo_pago}</span>
+                  </div>
+                  {selected.precio_total && (
+                    <p className="text-xs text-emerald-600 mt-1">
+                      Propietario recibe: <strong>{(selected.precio_total * 0.85).toLocaleString("es-ES", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}€</strong>
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <div>
+                  <p className="text-xs font-medium text-stone-500 mb-2">Registrar método de pago</p>
+                  <div className="grid grid-cols-2 gap-2 mb-3">
+                    {(["Revolut", "Bizum", "Efectivo", "Transferencia"] as const).map((m) => (
+                      <button
+                        key={m}
+                        type="button"
+                        onClick={() => setMetodoPago(m)}
+                        className={`flex items-center justify-center gap-1.5 py-2 rounded-full text-xs font-semibold border transition-all cursor-pointer whitespace-nowrap ${
+                          metodoPago === m
+                            ? "bg-stone-900 text-white border-transparent"
+                            : "bg-white text-stone-500 border-stone-200 hover:border-stone-400"
+                        }`}
+                      >
+                        <i className={metodoPagoIcon[m]}></i>{m}
+                      </button>
+                    ))}
+                  </div>
+                  <button
+                    onClick={() => markAsPaid(selected.id)}
+                    disabled={saving}
+                    className="w-full flex items-center justify-center gap-2 bg-emerald-600 text-white py-3 rounded-full text-xs font-semibold hover:bg-emerald-500 transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50"
+                  >
+                    <i className="ri-money-euro-circle-line"></i>
+                    Marcar como pagado ({metodoPago})
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* Acciones de estado */}
+            <div className="space-y-2 pt-2 border-t border-stone-100">
+              <p className="text-xs font-semibold text-stone-500 uppercase tracking-wide">Cambiar estado</p>
+
+              {selected.estado === "pendiente" && (
+                <button
+                  onClick={() => updateEstado(selected.id, "confirmada")}
+                  disabled={saving}
+                  className="w-full bg-emerald-600 text-white py-3 rounded-full text-xs font-semibold hover:bg-emerald-500 cursor-pointer whitespace-nowrap transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+                >
+                  <i className="ri-check-double-line"></i>
+                  Confirmar reserva — bloquear fechas
+                </button>
+              )}
+
+              {selected.estado === "confirmada" && (
+                <button
+                  onClick={() => updateEstado(selected.id, "completada")}
+                  disabled={saving}
+                  className="w-full bg-stone-700 text-white py-3 rounded-full text-xs font-semibold hover:bg-stone-600 cursor-pointer whitespace-nowrap transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+                >
+                  <i className="ri-flag-line"></i>
+                  Marcar como completada
+                </button>
+              )}
+
+              {(selected.estado === "pendiente" || selected.estado === "confirmada") && (
+                <button
+                  onClick={() => updateEstado(selected.id, "cancelada")}
+                  disabled={saving}
+                  className="w-full border border-red-200 text-red-500 py-3 rounded-full text-xs font-medium hover:bg-red-50 cursor-pointer whitespace-nowrap transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+                >
+                  <i className="ri-close-circle-line"></i>
+                  Cancelar — liberar fechas en calendario
+                </button>
+              )}
+
+              {(selected.estado === "cancelada" || selected.estado === "completada") && (
+                <button
+                  onClick={() => updateEstado(selected.id, "pendiente")}
+                  disabled={saving}
+                  className="w-full border border-stone-200 text-stone-600 py-3 rounded-full text-xs font-medium hover:bg-stone-50 cursor-pointer whitespace-nowrap transition-colors disabled:opacity-50"
+                >
+                  Restablecer a pendiente
+                </button>
+              )}
+
+              {/* WhatsApp directo al cliente */}
+              {selected.cliente_telefono && (
+                <a
+                  href={`https://wa.me/${selected.cliente_telefono.replace(/\D/g, "")}?text=Hola%20${encodeURIComponent(selected.cliente_nombre || "")}%2C%20te%20escribimos%20desde%20NEXURA%20sobre%20tu%20reserva%20del%20${encodeURIComponent(selected.barco_nombre || "barco")}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="w-full flex items-center justify-center gap-2 border border-stone-200 text-stone-600 py-3 rounded-full text-xs font-medium hover:bg-stone-50 cursor-pointer whitespace-nowrap transition-colors"
+                >
+                  <i className="ri-whatsapp-line text-green-500"></i>
+                  Contactar por WhatsApp
+                </a>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Modal nueva reserva */}
+      {showNewModal && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between mb-6">
+              <h3 className="font-semibold text-stone-900 flex items-center gap-2">
+                <i className="ri-ship-line text-sky-600"></i>
+                Nueva reserva de barco
+              </h3>
+              <button
+                onClick={() => setShowNewModal(false)}
+                className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-stone-100 cursor-pointer text-stone-400"
+              >
+                <i className="ri-close-line"></i>
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="col-span-2">
+                  <label className="text-xs font-medium text-stone-600 mb-1.5 block">Embarcación</label>
+                  <input
+                    type="text"
+                    placeholder="Nombre del barco o catamarán"
+                    value={newForm.barco_nombre}
+                    onChange={(e) => setNewForm((f) => ({ ...f, barco_nombre: e.target.value }))}
+                    className="w-full border border-stone-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-stone-400 bg-stone-50"
+                  />
+                </div>
+                <div className="col-span-2">
+                  <label className="text-xs font-medium text-stone-600 mb-1.5 block">Nombre del cliente</label>
+                  <input
+                    type="text"
+                    placeholder="Nombre completo"
+                    value={newForm.cliente_nombre}
+                    onChange={(e) => setNewForm((f) => ({ ...f, cliente_nombre: e.target.value }))}
+                    className="w-full border border-stone-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-stone-400 bg-stone-50"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-stone-600 mb-1.5 block">Email</label>
+                  <input
+                    type="email"
+                    placeholder="cliente@email.com"
+                    value={newForm.cliente_email}
+                    onChange={(e) => setNewForm((f) => ({ ...f, cliente_email: e.target.value }))}
+                    className="w-full border border-stone-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-stone-400 bg-stone-50"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-stone-600 mb-1.5 block">Teléfono</label>
+                  <input
+                    type="tel"
+                    placeholder="+34 600 000 000"
+                    value={newForm.cliente_telefono}
+                    onChange={(e) => setNewForm((f) => ({ ...f, cliente_telefono: e.target.value }))}
+                    className="w-full border border-stone-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-stone-400 bg-stone-50"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-stone-600 mb-1.5 block">Fecha de salida</label>
+                  <input
+                    type="date"
+                    value={newForm.fecha_inicio}
+                    onChange={(e) => setNewForm((f) => ({ ...f, fecha_inicio: e.target.value }))}
+                    className="w-full border border-stone-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-stone-400 bg-stone-50"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-stone-600 mb-1.5 block">Fecha de regreso</label>
+                  <input
+                    type="date"
+                    value={newForm.fecha_fin}
+                    min={newForm.fecha_inicio}
+                    onChange={(e) => setNewForm((f) => ({ ...f, fecha_fin: e.target.value }))}
+                    className="w-full border border-stone-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-stone-400 bg-stone-50"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-stone-600 mb-1.5 block">Duración</label>
+                  <select
+                    value={newForm.duracion}
+                    onChange={(e) => setNewForm((f) => ({ ...f, duracion: e.target.value }))}
+                    className="w-full border border-stone-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-stone-400 bg-stone-50 cursor-pointer"
+                  >
+                    <option>Día completo</option>
+                    <option>Medio día</option>
+                    <option>Varios días</option>
+                    <option>Semana</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-stone-600 mb-1.5 block">Nº personas</label>
+                  <input
+                    type="number"
+                    min={1}
+                    value={newForm.num_personas}
+                    onChange={(e) => setNewForm((f) => ({ ...f, num_personas: parseInt(e.target.value) || 1 }))}
+                    className="w-full border border-stone-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-stone-400 bg-stone-50"
+                  />
+                </div>
+                <div className="col-span-2">
+                  <label className="text-xs font-medium text-stone-600 mb-1.5 block">Precio base embarcación (€)</label>
+                  <input
+                    type="number"
+                    min={0}
+                    step={0.01}
+                    placeholder="0.00"
+                    value={newForm.precio_base || ""}
+                    onChange={(e) => setNewForm((f) => ({ ...f, precio_base: parseFloat(e.target.value) || 0 }))}
+                    className="w-full border border-stone-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-stone-400 bg-stone-50"
+                  />
+                </div>
+              </div>
+
+              {/* Desglose automático */}
+              {newForm.precio_base > 0 && (() => {
+                const comision = Math.round(newForm.precio_base * 0.15);
+                const iva = Math.round(comision * 0.21);
+                const total = newForm.precio_base + comision + iva;
+                return (
+                  <div className="bg-stone-50 rounded-xl border border-stone-200 p-4 space-y-2">
+                    <p className="text-xs font-semibold text-stone-500 uppercase tracking-wide">Desglose automático</p>
+                    <div className="flex justify-between text-xs text-stone-600">
+                      <span>Base embarcación</span>
+                      <span>€{newForm.precio_base.toLocaleString("es-ES")}</span>
+                    </div>
+                    <div className="flex justify-between text-xs text-stone-600">
+                      <span>Comisión NEXURA (15%)</span>
+                      <span>€{comision.toLocaleString("es-ES")}</span>
+                    </div>
+                    <div className="flex justify-between text-xs text-amber-700 font-semibold">
+                      <span>IVA 21% (mediación)</span>
+                      <span>€{iva.toLocaleString("es-ES")}</span>
+                    </div>
+                    <div className="flex justify-between font-bold text-stone-900 pt-2 border-t border-stone-200 text-sm">
+                      <span>Total cliente</span>
+                      <span>€{total.toLocaleString("es-ES")}</span>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              <div>
+                <label className="text-xs font-medium text-stone-600 mb-1.5 block">Notas</label>
+                <textarea
+                  rows={2}
+                  maxLength={500}
+                  placeholder="Peticiones especiales, ruta, etc..."
+                  value={newForm.notas}
+                  onChange={(e) => setNewForm((f) => ({ ...f, notas: e.target.value }))}
+                  className="w-full border border-stone-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-stone-400 bg-stone-50 resize-none"
+                />
+              </div>
+            </div>
+
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={() => setShowNewModal(false)}
+                className="flex-1 border border-stone-200 text-stone-600 py-3 rounded-full text-sm font-medium hover:bg-stone-50 cursor-pointer whitespace-nowrap"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={handleCreateBooking}
+                disabled={newSaving || !newForm.barco_nombre || !newForm.cliente_nombre || !newForm.fecha_inicio || !newForm.fecha_fin}
+                className="flex-1 bg-stone-900 text-white py-3 rounded-full text-sm font-semibold hover:bg-stone-700 cursor-pointer whitespace-nowrap transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {newSaving ? (
+                  <><i className="ri-loader-4-line animate-spin mr-1"></i> Creando...</>
+                ) : (
+                  <><i className="ri-ship-line mr-1"></i> Crear reserva</>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
